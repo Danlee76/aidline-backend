@@ -48,7 +48,7 @@ export function decodeEvent(ev: rpc.Api.EventResponse): AidlineEvent | null {
         type: 'donated',
         campaignId: BigInt(topics[1]),
         donor: String(topics[2]),
-        amount: BigInt(data.amount as bigint),
+        amount: BigInt(typeof data === 'object' && !Array.isArray(data) && 'amount' in data ? data.amount as bigint : scValToNative(ev.value)),
       };
     case 'released':
     case 'milestone_released':
