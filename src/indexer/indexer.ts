@@ -7,6 +7,8 @@ import { decodeEvent, type AidlineEvent } from '../stellar/events.js';
 import { recordEvent, upsertCampaign } from './store.js';
 
 const PAGE_SIZE = 100;
+const CAMPAIGN_READ_CONCURRENCY = 5;
+const REFRESH_RETRY_MS = 60_000;
 
 /**
  * Phrases that appear in Soroban RPC error messages when the stored cursor
@@ -67,6 +69,7 @@ export interface IndexerOptions {
 export class Indexer {
   private timer: NodeJS.Timeout | null = null;
   private stopped = true;
+  private readonly warnedCampaigns = new Set<string>();
 
   constructor(private readonly opts: IndexerOptions) {}
 
@@ -138,7 +141,20 @@ export class Indexer {
       for (const ev of events) {
         if ('campaignId' in ev) {
           const campaign = campaigns.get(ev.campaignId);
-          if (campaign) await upsertCampaign(client, campaign, ev);
+          if (campaign) {
+            await upsertCampaign(client, campaign, ev);
+            await client.query('DELETE FROM campaign_refresh_queue WHERE campaign_id = $1', [ev.campaignId.toString()]);
+          } else {
+            await client.query(
+              'INSERT INTO campaign_refresh_queue (campaign_id) VALUES ($1) ON CONFLICT DO NOTHING',
+              [ev.campaignId.toString()],
+            );
+            await client.query(
+              'INSERT INTO pending_campaign_events (event_id, campaign_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+              [ev.eventId, ev.campaignId.toString(), JSON.stringify(ev, (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value)],
+            );
+            continue;
+          }
         }
         await recordEvent(client, ev);
       }
@@ -156,6 +172,8 @@ export class Indexer {
     } finally {
       client.release();
     }
+
+    await this.retryPendingCampaigns();
 
     // A committed write makes cached aggregates stale, so drop them immediately.
     this.opts.cache?.clear();
@@ -257,19 +275,72 @@ export class Indexer {
    * Reads the latest state of every campaign touched by this page. The
    * contract is the source of truth, so totals are copied rather than summed.
    */
+  private async retryPendingCampaigns(): Promise<void> {
+    const { rows } = await this.opts.db.query<{ campaign_id: string; warned: boolean }>(
+      `SELECT campaign_id, warned FROM campaign_refresh_queue
+       WHERE last_attempt_at IS NULL OR last_attempt_at < now() - interval '60 seconds'
+       ORDER BY campaign_id LIMIT 20`,
+    );
+    const ids = rows.map((row) => BigInt(row.campaign_id));
+    const found = await this.readCampaigns(ids);
+    for (const row of rows) {
+      const id = BigInt(row.campaign_id);
+      const campaign = found.get(id);
+      if (!campaign) {
+        await this.opts.db.query(
+          'UPDATE campaign_refresh_queue SET last_attempt_at = now() WHERE campaign_id = $1',
+          [row.campaign_id],
+        );
+        continue;
+      }
+      const client = await this.opts.db.connect();
+      try {
+        await client.query('BEGIN');
+        await upsertCampaign(client, campaign, { ledger: 0, closedAt: new Date() });
+        const pending = await client.query<{ payload: AidlineEvent }>(
+          'SELECT payload FROM pending_campaign_events WHERE campaign_id = $1 ORDER BY created_at, event_id',
+          [row.campaign_id],
+        );
+        for (const { payload } of pending.rows) {
+          const ev = { ...payload, campaignId: id, closedAt: new Date(payload.closedAt) } as AidlineEvent;
+          if ('amount' in ev) ev.amount = BigInt(ev.amount);
+          await recordEvent(client, ev);
+        }
+        await client.query('DELETE FROM pending_campaign_events WHERE campaign_id = $1', [row.campaign_id]);
+        await client.query('DELETE FROM campaign_refresh_queue WHERE campaign_id = $1', [row.campaign_id]);
+        await client.query('COMMIT');
+        this.warnedCampaigns.delete(row.campaign_id);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+  }
+
+  private async readCampaigns(ids: bigint[]) {
+    const results = new Map<bigint, Awaited<ReturnType<ContractReader['getCampaign']>>>();
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(CAMPAIGN_READ_CONCURRENCY, ids.length) }, async () => {
+      while (next < ids.length) {
+        const id = ids[next++]!;
+        try {
+          results.set(id, await this.opts.contract.getCampaign(id));
+        } catch (err) {
+          if (!this.warnedCampaigns.has(id.toString())) {
+            this.opts.log.warn({ err, campaignId: id.toString() }, 'campaign read failed; queued for refresh');
+            this.warnedCampaigns.add(id.toString());
+          }
+        }
+      }
+    }));
+    return results;
+  }
+
   private async fetchCampaigns(events: AidlineEvent[]) {
     const ids = new Set<bigint>();
     for (const ev of events) if ('campaignId' in ev) ids.add(ev.campaignId);
-    const entries = await Promise.all(
-      [...ids].map(async (id) => [id, await this.opts.contract.getCampaign(id)] as const),
-    );
-    return new Map(entries);
-  }
-
-  private async startLedger(): Promise<number> {
-    const { oldestLedger, latestLedger } = await this.opts.source.getHealth();
-    const wanted = this.opts.startLedger ?? latestLedger - 1000;
-    // RPC only keeps recent history. Starting before that is an error.
-    return Math.max(wanted, oldestLedger);
+    return this.readCampaigns([...ids]);
   }
 }
