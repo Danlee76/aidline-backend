@@ -8,7 +8,6 @@ import { recordEvent, upsertCampaign } from './store.js';
 
 const PAGE_SIZE = 100;
 const CAMPAIGN_READ_CONCURRENCY = 5;
-const REFRESH_RETRY_MS = 60_000;
 
 /**
  * Phrases that appear in Soroban RPC error messages when the stored cursor
@@ -143,7 +142,6 @@ export class Indexer {
           const campaign = campaigns.get(ev.campaignId);
           if (campaign) {
             await upsertCampaign(client, campaign, ev);
-            await client.query('DELETE FROM campaign_refresh_queue WHERE campaign_id = $1', [ev.campaignId.toString()]);
           } else {
             await client.query(
               'INSERT INTO campaign_refresh_queue (campaign_id) VALUES ($1) ON CONFLICT DO NOTHING',
@@ -304,6 +302,7 @@ export class Indexer {
         for (const { payload } of pending.rows) {
           const ev = { ...payload, campaignId: id, closedAt: new Date(payload.closedAt) } as AidlineEvent;
           if ('amount' in ev) ev.amount = BigInt(ev.amount);
+          if ('campaignId' in ev && ev.type === 'milestone_released') ev.amount = BigInt(ev.amount);
           await recordEvent(client, ev);
         }
         await client.query('DELETE FROM pending_campaign_events WHERE campaign_id = $1', [row.campaign_id]);
