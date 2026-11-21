@@ -76,6 +76,30 @@ describe('liveness and readiness', () => {
     await apiOnly.close();
   });
 
+  it('reports fresh sync age and staleness in health and metrics', async () => {
+    const res = await app.inject({ url: '/health' });
+    expect(res.json()).toMatchObject({ stale: false });
+    expect(res.json().lastSyncedAt).toEqual(expect.any(String));
+    expect(res.json().secondsSinceSync).toBeGreaterThanOrEqual(0);
+    const metrics = await app.inject({ url: '/metrics' });
+    if (metrics.statusCode === 200) {
+      expect(metrics.body).toContain('aidline_indexer_seconds_since_sync');
+    }
+  });
+
+  it('reports stale sync even if ledger lag remains zero', async () => {
+    await db.query("UPDATE indexer_state SET latest_ledger = last_ledger, updated_at = now() - interval '2 hours' WHERE id = 1");
+    const res = await app.inject({ url: '/health' });
+    expect(res.json()).toMatchObject({ lagLedgers: 0, stale: true });
+    expect(res.json().secondsSinceSync).toBeGreaterThanOrEqual(7200);
+  });
+
+  it('reports never synced as stale', async () => {
+    await db.query('DELETE FROM indexer_state');
+    const res = await app.inject({ url: '/health' });
+    expect(res.json()).toMatchObject({ lastSyncedAt: null, secondsSinceSync: null, stale: true });
+  });
+
   it('keeps GET /health for compatibility', async () => {
     const res = await app.inject({ url: '/health' });
     expect(res.statusCode).toBe(200);

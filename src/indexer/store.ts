@@ -54,6 +54,30 @@ export async function recordEvent(client: PoolClient, ev: AidlineEvent): Promise
   const common = [ev.eventId, ev.ledger, ev.txHash, ev.closedAt] as const;
 
   switch (ev.type) {
+    case 'sponsor_pool_deposited':
+      await client.query(
+        `INSERT INTO sponsor_pool_deposits
+         (event_id, ledger, tx_hash, created_at, campaign_id, sponsor, amount, ratio_bps, cap)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING`,
+        [...common, ev.campaignId.toString(), ev.sponsor, ev.amount.toString(), ev.ratioBps, ev.cap.toString()],
+      );
+      return;
+    case 'sponsor_pool_matched':
+      await client.query(
+        `INSERT INTO sponsor_pool_matches
+         (event_id, ledger, tx_hash, created_at, campaign_id, sponsor, donor, donation_amount, matched_amount)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING`,
+        [...common, ev.campaignId.toString(), ev.sponsor, ev.donor, ev.donationAmount.toString(), ev.matchedAmount.toString()],
+      );
+      return;
+    case 'sponsor_pool_returned':
+      await client.query(
+        `INSERT INTO sponsor_pool_returns
+         (event_id, ledger, tx_hash, created_at, campaign_id, sponsor, amount)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+        [...common, ev.campaignId.toString(), ev.sponsor, ev.amount.toString()],
+      );
+      return;
     case 'campaign_created':
       // The campaign row is written by upsertCampaign. Pin its creation time
       // to this event in case it was first seen through a later event.

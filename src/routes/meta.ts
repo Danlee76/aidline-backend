@@ -14,13 +14,17 @@ export async function metaRoutes(app: FastifyInstance) {
     const { rows } = await app.db.query<{
       last_ledger: number | null;
       latest_ledger: number | null;
-    }>('SELECT last_ledger, latest_ledger FROM indexer_state WHERE id = 1');
+      updated_at: string | Date | null;
+    }>('SELECT last_ledger, latest_ledger, updated_at FROM indexer_state WHERE id = 1');
     const row = rows[0];
     const indexedLedger = row?.last_ledger ?? null;
     const latestLedger = row?.latest_ledger ?? null;
     const lagLedgers =
       indexedLedger !== null && latestLedger !== null ? latestLedger - indexedLedger : null;
-    return { ok: true, indexedLedger, latestLedger, lagLedgers };
+    const lastSyncedAt = row?.updated_at ? new Date(row.updated_at).toISOString() : null;
+    const secondsSinceSync = lastSyncedAt ? Math.max(0, Math.floor((Date.now() - new Date(lastSyncedAt).getTime()) / 1000)) : null;
+    const stale = secondsSinceSync === null || secondsSinceSync * 1000 > INDEXER_STALE_MS;
+    return { ok: true, indexedLedger, latestLedger, lagLedgers, lastSyncedAt, secondsSinceSync, stale };
   });
 
   /** Liveness: the process is running. Deliberately does not touch the database. */

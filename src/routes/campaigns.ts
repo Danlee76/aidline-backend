@@ -71,6 +71,35 @@ const CSV_HEADERS = [
 ].join(',');
 
 export async function campaignRoutes(app: FastifyInstance) {
+  app.get('/campaigns/:id/sponsor-pool', async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
+    const campaignId = id.toString();
+    const exists = await app.db.query('SELECT 1 FROM campaigns WHERE id = $1', [campaignId]);
+    if (!exists.rowCount) return notFound(reply, 'campaign');
+
+    const [deposits, matches, returns] = await Promise.all([
+      app.db.query<{ sponsor: string; amount: string; ratio_bps: number; cap: string }>(
+        'SELECT sponsor, amount, ratio_bps, cap FROM sponsor_pool_deposits WHERE campaign_id = $1 ORDER BY created_at, event_id', [campaignId]),
+      app.db.query<{ event_id: string; sponsor: string; donor: string; donation_amount: string; matched_amount: string; tx_hash: string; created_at: Date }>(
+        'SELECT event_id, sponsor, donor, donation_amount, matched_amount, tx_hash, created_at FROM sponsor_pool_matches WHERE campaign_id = $1 ORDER BY created_at, event_id', [campaignId]),
+      app.db.query<{ sponsor: string; amount: string }>(
+        'SELECT sponsor, amount FROM sponsor_pool_returns WHERE campaign_id = $1', [campaignId]),
+    ]);
+    const sum = (values: string[]) => values.reduce((total, value) => total + BigInt(value), 0n).toString();
+    const deposited = sum(deposits.rows.map((r) => r.amount));
+    const matched = sum(matches.rows.map((r) => r.matched_amount));
+    const returned = sum(returns.rows.map((r) => r.amount));
+    return {
+      campaignId,
+      sponsor: deposits.rows.at(-1)?.sponsor ?? null,
+      sponsors: [...new Set(deposits.rows.map((r) => r.sponsor))],
+      deposited, matched, returned,
+      remaining: (BigInt(deposited) - BigInt(matched) - BigInt(returned)).toString(),
+      deposits: deposits.rows.map((r) => ({ sponsor: r.sponsor, amount: r.amount, ratioBps: r.ratio_bps, cap: r.cap })),
+      matches: matches.rows.map((r) => ({ eventId: r.event_id, sponsor: r.sponsor, donor: r.donor, donationAmount: r.donation_amount, matchedAmount: r.matched_amount, txHash: r.tx_hash, createdAt: r.created_at })),
+    };
+  });
+
   app.get('/campaigns', async (req) => {
     const q = listQuery.parse(req.query);
     const where: string[] = [];

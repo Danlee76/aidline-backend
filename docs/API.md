@@ -402,3 +402,17 @@ Two other codes can appear but are not request mistakes you can fix by editing t
 - `internal_error` with status 500 means the server failed. The response message is deliberately generic; the cause is in the server logs. Retry with backoff and include the `X-Request-Id` response header when reporting it.
 
 All responses carry an `X-Request-Id` header. Include it with any bug report so a specific request can be traced in the logs.
+
+## GET /campaigns/:id/sponsor-pool
+
+Returns indexed sponsor-pool deposits, matches and returns for a campaign.
+The campaign must exist (otherwise 404). The response includes `campaignId`,
+`sponsor` (most recent deposit sponsor, or null), `sponsors` (all recorded
+sponsors), `deposited`, `matched`, `returned`, `remaining`,
+`deposits` (sponsor, amount, ratioBps, cap) and `matches` (eventId,
+sponsor, donor, donationAmount, matchedAmount, txHash, createdAt).
+All token amounts are decimal strings; no floating-point conversion occurs.
+
+The `GET /health` response additionally includes `lastSyncedAt` (ISO 8601
+or null), `secondsSinceSync` (integer or null) and `stale` (boolean,
+true when no successful sync occurred in the last 60 seconds).
