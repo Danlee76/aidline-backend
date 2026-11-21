@@ -56,6 +56,23 @@ export function registerMetrics(app: FastifyInstance) {
     'latest_ledger - last_ledger',
   );
 
+  new Gauge({
+    name: 'aidline_indexer_seconds_since_sync',
+    help: 'Seconds elapsed since the last successful indexer sync (-1 when never synced)',
+    registers: [registry],
+    async collect() {
+      try {
+        const { rows } = await app.db.query<{ updated_at: Date | string | null }>(
+          'SELECT updated_at FROM indexer_state WHERE id = 1',
+        );
+        const last = rows[0]?.updated_at;
+        this.set(last ? Math.max(0, (Date.now() - new Date(last).getTime()) / 1000) : -1);
+      } catch (err) {
+        app.log.warn({ err }, 'could not read indexer sync age for metrics');
+      }
+    },
+  });
+
   app.addHook('onResponse', async (req, reply) => {
     const route = req.routeOptions.url ?? 'unmatched';
     if (route === '/metrics') return;

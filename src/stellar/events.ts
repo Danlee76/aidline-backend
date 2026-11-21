@@ -21,7 +21,33 @@ export type AidlineEvent = EventBase &
     | { type: 'campaign_cancelled'; campaignId: bigint }
     | { type: 'refunded'; campaignId: bigint; donor: string; amount: bigint }
     | { type: 'verifier_updated'; verifier: string; active: boolean }
-    | { type: 'verifier_reassigned'; campaignId: bigint; oldVerifier: string; newVerifier: string }
+    | {
+        type: 'pledge_created';
+        campaignId: bigint;
+        donor: string;
+        pledgeId: bigint;
+        amount: bigint;
+      }
+    | { type: 'pledge_pulled'; campaignId: bigint; donor: string; pledgeId: bigint; amount: bigint }
+    | {
+        type: 'pledge_skipped';
+        campaignId: bigint;
+        donor: string;
+        pledgeId: bigint;
+        reason: number;
+      }
+    | { type: 'pledge_settlement'; campaignId: bigint; milestoneIndex: number; amount: bigint }
+    | { type: 'verifier_bond_posted'; verifier: string; amount: bigint }
+    | { type: 'verifier_deregistered'; verifier: string; deregisteredAt: bigint }
+    | { type: 'bond_withdrawn'; verifier: string; amount: bigint }
+    | { type: 'bond_slashed'; verifier: string; campaignId: bigint; amount: bigint }
+    | {
+        type: 'emergency_advance_released';
+        campaignId: bigint;
+        verifier: string;
+        milestoneIndex: number;
+        amount: bigint;
+      }
   );
 
 /**
@@ -79,10 +105,79 @@ export function decodeEvent(ev: rpc.Api.EventResponse): AidlineEvent | null {
         verifier: String(topics[1]),
         active: Boolean(topics[0] === 'verifier' ? scValToNative(ev.value) : data.active),
       };
-    case 'vf_reass': {
-      const values = scValToNative(ev.value) as unknown[];
-      return { ...base, type: 'verifier_reassigned', campaignId: BigInt(topics[1]), oldVerifier: String(values[0]), newVerifier: String(values[1]) };
-    }
+    case 'pledge_created':
+      return {
+        ...base,
+        type: 'pledge_created',
+        campaignId: BigInt(topics[1]),
+        donor: String(topics[2]),
+        pledgeId: BigInt(data.pledge_id as bigint),
+        amount: BigInt(data.pledged_amount as bigint),
+      };
+    case 'pledge_pulled':
+      return {
+        ...base,
+        type: 'pledge_pulled',
+        campaignId: BigInt(topics[1]),
+        donor: String(topics[2]),
+        pledgeId: BigInt(data.pledge_id as bigint),
+        amount: BigInt(data.pulled_amount as bigint),
+      };
+    case 'pledge_skipped':
+      return {
+        ...base,
+        type: 'pledge_skipped',
+        campaignId: BigInt(topics[1]),
+        donor: String(topics[2]),
+        pledgeId: BigInt(data.pledge_id as bigint),
+        reason: Number(data.reason),
+      };
+    case 'pledge_settlement':
+      return {
+        ...base,
+        type: 'pledge_settlement',
+        campaignId: BigInt(topics[1]),
+        milestoneIndex: Number(data.milestone_index),
+        amount: BigInt(data.total_pledged_pulled as bigint),
+      };
+    case 'verifier_bond_posted':
+      return {
+        ...base,
+        type: 'verifier_bond_posted',
+        verifier: String(topics[1]),
+        amount: BigInt(data.amount as bigint),
+      };
+    case 'verifier_deregistered':
+      return {
+        ...base,
+        type: 'verifier_deregistered',
+        verifier: String(topics[1]),
+        deregisteredAt: BigInt(data.deregistered_at as bigint),
+      };
+    case 'bond_withdrawn':
+      return {
+        ...base,
+        type: 'bond_withdrawn',
+        verifier: String(topics[1]),
+        amount: BigInt(data.amount as bigint),
+      };
+    case 'bond_slashed':
+      return {
+        ...base,
+        type: 'bond_slashed',
+        verifier: String(topics[1]),
+        campaignId: BigInt(topics[2]),
+        amount: BigInt(data.slashed_amount as bigint),
+      };
+    case 'emergency_advance_released':
+      return {
+        ...base,
+        type: 'emergency_advance_released',
+        campaignId: BigInt(topics[1]),
+        verifier: String(topics[2]),
+        milestoneIndex: Number(data.milestone_index),
+        amount: BigInt(data.amount as bigint),
+      };
     default:
       return null;
   }

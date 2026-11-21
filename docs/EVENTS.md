@@ -49,6 +49,8 @@ Every history row carries these common columns from the raw event: `event_id` (R
 
 ## Adding a new event
 
+The pledge, verifier-bond and emergency-advance events are stored in `pledge_events`, `verifier_bond_events` and `emergency_advances`; their current projections are exposed through the campaign, donor and verifier endpoints.
+
 1. **Contract first.** Add the struct and its `publish` implementation in `events.rs` and decide which fields are topics (identifiers) and which are data (payload).
 2. **Decode it.** Add a case to `decodeEvent` in `src/stellar/events.ts` and a variant to the `AidlineEvent` union. Keep the `eventId`, `ledger`, `txHash`, `closedAt` base fields. Return `null` for anything you do not handle.
 3. **Store it.** Add a `case` to `recordEvent` in `src/indexer/store.ts`. For a new table, add a numbered migration in `src/db/migrations/` (never edit an existing migration). Use the RPC event id as the primary key and `ON CONFLICT DO NOTHING`. If the event carries a `campaignId`, `upsertCampaign` will already refresh that campaign from the contract — you do not need to update totals yourself.

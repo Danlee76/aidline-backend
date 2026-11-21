@@ -67,6 +67,10 @@ On a fresh database the indexer starts at `INDEXER_START_LEDGER`. Set it to the 
 
 Watch the process logs for indexer errors. A failed page is retried on the next tick, so brief RPC outages heal themselves.
 
+## Rebuilding a database
+
+If the Postgres database is lost or `indexer_state` must be reset, run `npm run reindex` with the same `.env` used by the service. The command reads `campaign_count` and every `get_campaign` value from the contract, upserts current campaign state safely, clears the cursor, and exits. The normal indexer then resumes from the oldest ledger retained by the RPC. History events older than the RPC retention window cannot be reconstructed; current campaign totals remain authoritative because they come from contract state.
+
 For step-by-step diagnosis of lag, a stalled indexer, gap recovery, RPC outages, a lost database or a contract redeploy, see the [indexer runbook](RUNBOOK.md).
 
 ## Proof file storage

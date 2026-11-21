@@ -54,6 +54,30 @@ export async function recordEvent(client: PoolClient, ev: AidlineEvent): Promise
   const common = [ev.eventId, ev.ledger, ev.txHash, ev.closedAt] as const;
 
   switch (ev.type) {
+    case 'sponsor_pool_deposited':
+      await client.query(
+        `INSERT INTO sponsor_pool_deposits
+         (event_id, ledger, tx_hash, created_at, campaign_id, sponsor, amount, ratio_bps, cap)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING`,
+        [...common, ev.campaignId.toString(), ev.sponsor, ev.amount.toString(), ev.ratioBps, ev.cap.toString()],
+      );
+      return;
+    case 'sponsor_pool_matched':
+      await client.query(
+        `INSERT INTO sponsor_pool_matches
+         (event_id, ledger, tx_hash, created_at, campaign_id, sponsor, donor, donation_amount, matched_amount)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING`,
+        [...common, ev.campaignId.toString(), ev.sponsor, ev.donor, ev.donationAmount.toString(), ev.matchedAmount.toString()],
+      );
+      return;
+    case 'sponsor_pool_returned':
+      await client.query(
+        `INSERT INTO sponsor_pool_returns
+         (event_id, ledger, tx_hash, created_at, campaign_id, sponsor, amount)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+        [...common, ev.campaignId.toString(), ev.sponsor, ev.amount.toString()],
+      );
+      return;
     case 'campaign_created':
       // The campaign row is written by upsertCampaign. Pin its creation time
       // to this event in case it was first seen through a later event.
@@ -111,6 +135,144 @@ export async function recordEvent(client: PoolClient, ev: AidlineEvent): Promise
         `INSERT INTO verifiers (address, active) VALUES ($1, $2)
          ON CONFLICT (address) DO UPDATE SET active = EXCLUDED.active, updated_at = now()`,
         [ev.verifier, ev.active],
+      );
+      return;
+    case 'pledge_created':
+      await client.query(
+        `INSERT INTO pledge_events (event_id,event_type,pledge_id,campaign_id,donor,amount,ledger,tx_hash,created_at) VALUES ($1,'created',$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,
+        [
+          ev.eventId,
+          ev.pledgeId.toString(),
+          ev.campaignId.toString(),
+          ev.donor,
+          ev.amount.toString(),
+          ev.ledger,
+          ev.txHash,
+          ev.closedAt,
+        ],
+      );
+      await client.query(
+        `INSERT INTO pledges (pledge_id,campaign_id,donor,pledged_amount) VALUES ($1,$2,$3,$4) ON CONFLICT (pledge_id) DO UPDATE SET campaign_id=EXCLUDED.campaign_id, donor=EXCLUDED.donor, pledged_amount=EXCLUDED.pledged_amount, updated_at=now()`,
+        [ev.pledgeId.toString(), ev.campaignId.toString(), ev.donor, ev.amount.toString()],
+      );
+      return;
+    case 'pledge_pulled':
+      await client.query(
+        `INSERT INTO pledge_events (event_id,event_type,pledge_id,campaign_id,donor,amount,ledger,tx_hash,created_at) VALUES ($1,'pulled',$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,
+        [
+          ev.eventId,
+          ev.pledgeId.toString(),
+          ev.campaignId.toString(),
+          ev.donor,
+          ev.amount.toString(),
+          ev.ledger,
+          ev.txHash,
+          ev.closedAt,
+        ],
+      );
+      await client.query(
+        `UPDATE pledges SET pulled_amount=pulled_amount+$2,status='pulled',updated_at=now() WHERE pledge_id=$1`,
+        [ev.pledgeId.toString(), ev.amount.toString()],
+      );
+      return;
+    case 'pledge_skipped':
+      await client.query(
+        `INSERT INTO pledge_events (event_id,event_type,pledge_id,campaign_id,donor,reason,ledger,tx_hash,created_at) VALUES ($1,'skipped',$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,
+        [
+          ev.eventId,
+          ev.pledgeId.toString(),
+          ev.campaignId.toString(),
+          ev.donor,
+          ev.reason,
+          ev.ledger,
+          ev.txHash,
+          ev.closedAt,
+        ],
+      );
+      await client.query(
+        `UPDATE pledges SET status='skipped',skipped_reason=$2,updated_at=now() WHERE pledge_id=$1`,
+        [ev.pledgeId.toString(), ev.reason],
+      );
+      return;
+    case 'pledge_settlement':
+      await client.query(
+        `INSERT INTO pledge_events (event_id,event_type,campaign_id,donor,amount,milestone_index,ledger,tx_hash,created_at) VALUES ($1,'settled',$2,'',$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+        [
+          ev.eventId,
+          ev.campaignId.toString(),
+          ev.amount.toString(),
+          ev.milestoneIndex,
+          ev.ledger,
+          ev.txHash,
+          ev.closedAt,
+        ],
+      );
+      await client.query(
+        `UPDATE pledges SET status='settled',settled_at=$2,updated_at=now() WHERE campaign_id=$1 AND status='active'`,
+        [ev.campaignId.toString(), ev.closedAt],
+      );
+      return;
+    case 'verifier_bond_posted':
+      await client.query(
+        `INSERT INTO verifier_bond_events (event_id,event_type,verifier,amount,ledger,tx_hash,created_at) VALUES ($1,'posted',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+        [ev.eventId, ev.verifier, ev.amount.toString(), ev.ledger, ev.txHash, ev.closedAt],
+      );
+      await client.query(
+        `INSERT INTO verifiers (address,bond_amount,active) VALUES ($1,$2,true) ON CONFLICT (address) DO UPDATE SET bond_amount=verifiers.bond_amount+$2,updated_at=now()`,
+        [ev.verifier, ev.amount.toString()],
+      );
+      return;
+    case 'verifier_deregistered':
+      await client.query(
+        `INSERT INTO verifier_bond_events (event_id,event_type,verifier,amount,ledger,tx_hash,created_at) VALUES ($1,'deregistered',$2,0,$3,$4,$5) ON CONFLICT DO NOTHING`,
+        [ev.eventId, ev.verifier, ev.ledger, ev.txHash, ev.closedAt],
+      );
+      await client.query(
+        `UPDATE verifiers SET deregistered_at=to_timestamp($2),updated_at=now() WHERE address=$1`,
+        [ev.verifier, ev.deregisteredAt.toString()],
+      );
+      return;
+    case 'bond_withdrawn':
+      await client.query(
+        `INSERT INTO verifier_bond_events (event_id,event_type,verifier,amount,ledger,tx_hash,created_at) VALUES ($1,'withdrawn',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+        [ev.eventId, ev.verifier, ev.amount.toString(), ev.ledger, ev.txHash, ev.closedAt],
+      );
+      await client.query(
+        `UPDATE verifiers SET bond_amount=GREATEST(0,bond_amount-$2),updated_at=now() WHERE address=$1`,
+        [ev.verifier, ev.amount.toString()],
+      );
+      return;
+    case 'bond_slashed':
+      await client.query(
+        `INSERT INTO verifier_bond_events (event_id,event_type,verifier,campaign_id,amount,ledger,tx_hash,created_at) VALUES ($1,'slashed',$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+        [
+          ev.eventId,
+          ev.verifier,
+          ev.campaignId.toString(),
+          ev.amount.toString(),
+          ev.ledger,
+          ev.txHash,
+          ev.closedAt,
+        ],
+      );
+      await client.query(
+        `UPDATE verifiers SET bond_amount=GREATEST(0,bond_amount-$2),ever_slashed=true,updated_at=now() WHERE address=$1`,
+        [ev.verifier, ev.amount.toString()],
+      );
+      return;
+    case 'emergency_advance_released':
+      await client.query(
+        `INSERT INTO emergency_advances (event_id,campaign_id,verifier,milestone_index,amount,ledger,tx_hash,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,
+        [
+          ev.eventId,
+          ev.campaignId.toString(),
+          ev.verifier,
+          ev.milestoneIndex,
+          ev.amount.toString(),
+          ev.ledger,
+          ev.txHash,
+          ev.closedAt,
+        ],
       );
       return;
   }

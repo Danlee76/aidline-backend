@@ -8,12 +8,16 @@ export async function donorRoutes(app: FastifyInstance) {
     const { address } = z.object({ address: stellarAddress }).parse(req.params);
     const q = pagination.parse(req.query);
 
-    const [summary, donations, refunds] = await Promise.all([
+    const [summary, donations, refunds, pledges] = await Promise.all([
       app.db.query(
         `SELECT COALESCE(sum(amount), 0) AS "totalDonated",
                 count(DISTINCT campaign_id)::int AS "campaignsSupported"
          FROM donations WHERE donor = $1`,
         [address],
+      ),
+      app.db.query(
+        `SELECT pledge_id AS "pledgeId", campaign_id AS "campaignId", pledged_amount AS "pledgedAmount", pulled_amount AS "pulledAmount", status, updated_at AS "updatedAt" FROM pledges WHERE donor=$1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3`,
+        [address, q.limit, q.offset],
       ),
       app.db.query(
         `SELECT d.campaign_id AS "campaignId", d.amount, d.tx_hash AS "txHash",
@@ -38,6 +42,7 @@ export async function donorRoutes(app: FastifyInstance) {
       ...summary.rows[0],
       donations: donations.rows,
       refunds: refunds.rows,
+      pledges: pledges.rows,
     };
   });
 }

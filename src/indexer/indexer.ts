@@ -7,7 +7,7 @@ import { decodeEvent, type AidlineEvent } from '../stellar/events.js';
 import { recordEvent, upsertCampaign } from './store.js';
 
 const PAGE_SIZE = 100;
-const CAMPAIGN_READ_CONCURRENCY = 5;
+const MAX_FAILURE_BACKOFF_MS = 120_000;
 
 /**
  * Phrases that appear in Soroban RPC error messages when the stored cursor
@@ -67,30 +67,40 @@ export interface IndexerOptions {
  */
 export class Indexer {
   private timer: NodeJS.Timeout | null = null;
+  private inFlight: Promise<void> | null = null;
   private stopped = true;
-  private readonly warnedCampaigns = new Set<string>();
+  private consecutiveFailures = 0;
 
   constructor(private readonly opts: IndexerOptions) {}
 
   start(): void {
     this.stopped = false;
+    this.consecutiveFailures = 0;
     void this.loop();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    await this.inFlight;
   }
 
   private async loop(): Promise<void> {
     if (this.stopped) return;
     let delay = this.opts.pollMs;
     try {
-      const count = await this.syncOnce();
+      const sync = this.syncOnce();
+      this.inFlight = sync.then(
+        () => undefined,
+        () => undefined,
+      );
+      const count = await sync;
       // Keep draining without waiting while there is a backlog.
       if (count === PAGE_SIZE) delay = 0;
     } catch (err) {
       this.opts.log.error({ err }, 'indexer sync failed');
+    } finally {
+      this.inFlight = null;
     }
     if (!this.stopped) this.timer = setTimeout(() => void this.loop(), delay);
   }
@@ -106,13 +116,13 @@ export class Indexer {
 
     let res: rpc.Api.GetEventsResponse;
     try {
-      res = cursor
-        ? await source.getEvents({ cursor, filters, limit: PAGE_SIZE })
-        : await source.getEvents({
-            startLedger: await this.startLedger(),
-            filters,
-            limit: PAGE_SIZE,
-          });
+      if (!cursor) {
+        const start = await this.startLedger();
+        this.opts.log.info({ startLedger: start.ledger, source: start.source }, 'indexer starting from ledger on fresh database');
+        res = await source.getEvents({ startLedger: start.ledger, filters, limit: PAGE_SIZE });
+      } else {
+        res = await source.getEvents({ cursor, filters, limit: PAGE_SIZE });
+      }
     } catch (err) {
       // A stored cursor can fall out of the RPC's retention window if the
       // indexer was offline for too long. Missed events cannot be replayed,
@@ -177,6 +187,32 @@ export class Indexer {
     this.opts.cache?.clear();
     if (events.length) this.opts.log.info({ count: events.length }, 'indexed events');
     return res.events.length;
+  }
+
+  /** Rebuilds current campaign state after a database loss, then resumes from RPC history. */
+  async reindex(): Promise<number> {
+    if (!this.opts.contract.getCampaignCount)
+      throw new Error('contract reader does not support campaign_count');
+    const count = await this.opts.contract.getCampaignCount();
+    const client = await this.opts.db.connect();
+    try {
+      await client.query('BEGIN');
+      for (let id = 1n; id <= count; id++) {
+        const campaign = await this.opts.contract.getCampaign(id);
+        await upsertCampaign(client, campaign, { ledger: 0, closedAt: new Date() });
+      }
+      await client.query(
+        `INSERT INTO indexer_state (id,cursor,last_ledger,updated_at) VALUES (1,NULL,NULL,now()) ON CONFLICT (id) DO UPDATE SET cursor=NULL, updated_at=now()`,
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    this.opts.cache?.clear();
+    return Number(count);
   }
 
   /**
@@ -273,11 +309,26 @@ export class Indexer {
    * Reads the latest state of every campaign touched by this page. The
    * contract is the source of truth, so totals are copied rather than summed.
    */
-  private async retryPendingCampaigns(): Promise<void> {
-    const { rows } = await this.opts.db.query<{ campaign_id: string; warned: boolean }>(
-      `SELECT campaign_id, warned FROM campaign_refresh_queue
-       WHERE last_attempt_at IS NULL OR last_attempt_at < now() - interval '60 seconds'
-       ORDER BY campaign_id LIMIT 20`,
+  private async fetchCampaigns(events: AidlineEvent[]) {
+    const ids = new Set<bigint>();
+    for (const ev of events) if ('campaignId' in ev) ids.add(ev.campaignId);
+    const entries = (
+      await Promise.all(
+        [...ids].map(async (id) => {
+          const campaign = await this.opts.contract.getCampaign(id);
+          if (!['active', 'completed', 'cancelled'].includes(campaign.status)) {
+            this.opts.log.warn(
+              { campaignId: id.toString(), status: campaign.status },
+              'skipping campaign with unknown contract status',
+            );
+            return null;
+          }
+          return [id, campaign] as const;
+        }),
+      )
+    ).filter(
+      (entry): entry is readonly [bigint, Awaited<ReturnType<ContractReader['getCampaign']>>] =>
+        entry !== null,
     );
     const ids = rows.map((row) => BigInt(row.campaign_id));
     const found = await this.readCampaigns(ids);
@@ -318,28 +369,10 @@ export class Indexer {
     }
   }
 
-  private async readCampaigns(ids: bigint[]) {
-    const results = new Map<bigint, Awaited<ReturnType<ContractReader['getCampaign']>>>();
-    let next = 0;
-    await Promise.all(Array.from({ length: Math.min(CAMPAIGN_READ_CONCURRENCY, ids.length) }, async () => {
-      while (next < ids.length) {
-        const id = ids[next++]!;
-        try {
-          results.set(id, await this.opts.contract.getCampaign(id));
-        } catch (err) {
-          if (!this.warnedCampaigns.has(id.toString())) {
-            this.opts.log.warn({ err, campaignId: id.toString() }, 'campaign read failed; queued for refresh');
-            this.warnedCampaigns.add(id.toString());
-          }
-        }
-      }
-    }));
-    return results;
-  }
-
-  private async fetchCampaigns(events: AidlineEvent[]) {
-    const ids = new Set<bigint>();
-    for (const ev of events) if ('campaignId' in ev) ids.add(ev.campaignId);
-    return this.readCampaigns([...ids]);
+  private async startLedger(): Promise<{ ledger: number; source: 'configured' | 'default' | 'rpc_oldest' }> {
+    const { oldestLedger, latestLedger } = await this.opts.source.getHealth();
+    const wanted = this.opts.startLedger ?? latestLedger - 1000;
+    // RPC only keeps recent history. Starting before that is an error.
+    return { ledger: Math.max(wanted, oldestLedger), source: wanted < oldestLedger ? 'rpc_oldest' : this.opts.startLedger !== undefined ? 'configured' : 'default' };
   }
 }
