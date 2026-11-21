@@ -21,6 +21,7 @@ export type AidlineEvent = EventBase &
     | { type: 'campaign_cancelled'; campaignId: bigint }
     | { type: 'refunded'; campaignId: bigint; donor: string; amount: bigint }
     | { type: 'verifier_updated'; verifier: string; active: boolean }
+    | { type: 'verifier_reassigned'; campaignId: bigint; oldVerifier: string; newVerifier: string }
   );
 
 /**
@@ -38,6 +39,7 @@ export function decodeEvent(ev: rpc.Api.EventResponse): AidlineEvent | null {
   };
 
   switch (topics[0]) {
+    case 'created':
     case 'campaign_created':
       return { ...base, type: 'campaign_created', campaignId: BigInt(topics[1]) };
     case 'donated':
@@ -48,15 +50,17 @@ export function decodeEvent(ev: rpc.Api.EventResponse): AidlineEvent | null {
         donor: String(topics[2]),
         amount: BigInt(data.amount as bigint),
       };
+    case 'released':
     case 'milestone_released':
       return {
         ...base,
         type: 'milestone_released',
         campaignId: BigInt(topics[1]),
-        index: Number(data.index),
-        amount: BigInt(data.amount as bigint),
-        proofUri: String(data.proof_uri),
+        index: topics[0] === 'released' ? Number(topics[2]) : Number(data.index),
+        amount: BigInt(topics[0] === 'released' ? (data as unknown as unknown[])[0] : data.amount as bigint),
+        proofUri: String(topics[0] === 'released' ? (data as unknown as unknown[])[1] : data.proof_uri),
       };
+    case 'canceled':
     case 'campaign_cancelled':
       return { ...base, type: 'campaign_cancelled', campaignId: BigInt(topics[1]) };
     case 'refunded':
@@ -67,13 +71,18 @@ export function decodeEvent(ev: rpc.Api.EventResponse): AidlineEvent | null {
         donor: String(topics[2]),
         amount: BigInt(data.amount as bigint),
       };
+    case 'verifier':
     case 'verifier_updated':
       return {
         ...base,
         type: 'verifier_updated',
         verifier: String(topics[1]),
-        active: Boolean(data.active),
+        active: Boolean(topics[0] === 'verifier' ? scValToNative(ev.value) : data.active),
       };
+    case 'vf_reass': {
+      const values = scValToNative(ev.value) as unknown[];
+      return { ...base, type: 'verifier_reassigned', campaignId: BigInt(topics[1]), oldVerifier: String(values[0]), newVerifier: String(values[1]) };
+    }
     default:
       return null;
   }
